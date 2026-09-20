@@ -19,8 +19,8 @@
 
         <!-- Passwort Bereich -->
         <div id="passwordArea" class="bg-white p-6 rounded-2xl shadow-sm border mb-6 text-center">
-            <h2 class="text-lg font-bold text-gray-900 mb-2">Passwort festlegen / eingeben</h2>
-            <p class="text-sm text-gray-600 mb-4">Wähle dein Master-Passwort zum Verschlüsseln deiner Daten:</p>
+            <h2 class="text-lg font-bold text-gray-900 mb-2">Master-Passwort eingeben</h2>
+            <p class="text-sm text-gray-600 mb-4">Gib dein festes Passwort ein, um die Daten zu entsperren:</p>
             <form onsubmit="initDatabase(event)" class="max-w-md mx-auto space-y-3">
                 <input type="password" id="userPassword" placeholder="Dein Master-Passwort" required class="w-full px-4 py-2 border rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500">
                 
@@ -30,7 +30,7 @@
                 </div>
 
                 <button type="submit" class="w-full bg-indigo-600 text-white font-semibold px-6 py-2 rounded-xl hover:bg-indigo-700 transition">
-                    Starten / Entschlüsseln
+                    Entschlüsseln
                 </button>
             </form>
         </div>
@@ -98,48 +98,80 @@
         let currentPassword = "";
         let allExpenses = [];
 
-        // Hier tragen wir als Nächstes deine CouchDB Cloud-Adresse ein:
         const COUCHDB_URL = ""; 
 
-        // Automatische Prüfung beim Laden der Seite
         window.addEventListener('DOMContentLoaded', () => {
             const savedPassword = localStorage.getItem('haushaltsbuch_saved_pw');
             if (savedPassword) {
                 document.getElementById('userPassword').value = savedPassword;
                 document.getElementById('rememberPassword').checked = true;
-                initDatabase(); // Automatisch einloggen!
+                initDatabase();
             }
         });
 
-        function initDatabase(e) {
+        async function initDatabase(e) {
             if (e) e.preventDefault();
             const pwInput = document.getElementById('userPassword').value;
             const remember = document.getElementById('rememberPassword').checked;
 
             if (!pwInput) return;
 
-            currentPassword = pwInput;
-
-            // Passwort merken oder löschen
-            if (remember) {
-                localStorage.setItem('haushaltsbuch_saved_pw', currentPassword);
-            } else {
-                localStorage.removeItem('haushaltsbuch_saved_pw');
-            }
-
             localDB = new PouchDB('haushaltsbuch_pouch');
 
-            // CouchDB Live-Synchronisation
-            if (COUCHDB_URL) {
-                remoteDB = new PouchDB(COUCHDB_URL);
-                localDB.sync(remoteDB, { live: true, retry: true })
-                    .on('change', () => loadExpenses())
-                    .on('error', (err) => console.error("Sync Fehler:", err));
-            }
+            try {
+                // Prüfen, ob bereits ein Master-Schloss in der DB existiert
+                let lockDoc;
+                try {
+                    lockDoc = await localDB.get('master_lock');
+                } catch (err) {
+                    // Existiert noch nicht -> Dies ist der Erststart, wir legen das Schloss an!
+                }
 
-            document.getElementById('passwordArea').classList.add('hidden');
-            document.getElementById('mainContent').classList.remove('hidden');
-            loadExpenses();
+                if (lockDoc) {
+                    // Testen, ob das eingegebene Passwort das richtige ist
+                    try {
+                        let bytes = CryptoJS.AES.decrypt(lockDoc.encryptedData, pwInput);
+                        let decrypted = bytes.toString(CryptoJS.enc.Utf8);
+                        if (decrypted !== "VALID_MASTER_KEY") {
+                            alert("Falsches Passwort! Zugriff verweigert.");
+                            return;
+                        }
+                    } catch (err) {
+                        alert("Falsches Passwort! Zugriff verweigert.");
+                        return;
+                    }
+                } else {
+                    // Erster Start: Master-Schloss mit diesem Passwort für immer festlegen
+                    const encryptedMarker = CryptoJS.AES.encrypt("VALID_MASTER_KEY", pwInput).toString();
+                    await localDB.put({
+                        _id: 'master_lock',
+                        encryptedData: encryptedMarker
+                    });
+                }
+
+                currentPassword = pwInput;
+
+                if (remember) {
+                    localStorage.setItem('haushaltsbuch_saved_pw', currentPassword);
+                } else {
+                    localStorage.removeItem('haushaltsbuch_saved_pw');
+                }
+
+                if (COUCHDB_URL) {
+                    remoteDB = new PouchDB(COUCHDB_URL);
+                    localDB.sync(remoteDB, { live: true, retry: true })
+                        .on('change', () => loadExpenses())
+                        .on('error', (err) => console.error("Sync Fehler:", err));
+                }
+
+                document.getElementById('passwordArea').classList.add('hidden');
+                document.getElementById('mainContent').classList.remove('hidden');
+                loadExpenses();
+
+            } catch (err) {
+                console.error("Fehler beim Initialisieren:", err);
+                alert("Ein Fehler ist aufgetreten.");
+            }
         }
 
         async function loadExpenses() {
@@ -149,6 +181,9 @@
                 allExpenses = [];
 
                 for (let row of result.rows) {
+                    // Das System-Schloss-Dokument überspringen
+                    if (row.id === 'master_lock') continue;
+
                     if (row.doc.encryptedData) {
                         try {
                             let bytes = CryptoJS.AES.decrypt(row.doc.encryptedData, currentPassword);
