@@ -3,10 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Mein Haushaltsbuch & Budget-Tracker</title>
-    <!-- CSS für Design -->
+    <title>Mein Haushaltsbuch</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Verschlüsselung & Datenbank -->
     <script src="https://cdn.jsdelivr.net/npm/pouchdb@7.3.1/dist/pouchdb.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/crypto-js/4.1.1/crypto-js.min.js"></script>
 </head>
@@ -16,22 +14,28 @@
         <!-- Header -->
         <header class="bg-indigo-600 text-white p-4 rounded-2xl shadow-md mb-6 flex justify-between items-center">
             <h1 class="text-xl font-bold">Mein Haushaltsbuch</h1>
-            <button onclick="logoutPasswort()" class="text-xs bg-indigo-700 hover:bg-indigo-800 px-3 py-1.5 rounded-lg">Sperren</button>
+            <button onclick="logoutPasswort()" class="text-xs bg-indigo-700 hover:bg-indigo-800 px-3 py-1.5 rounded-lg">Sperren / Passwort löschen</button>
         </header>
 
         <!-- Passwort Bereich -->
         <div id="passwordArea" class="bg-white p-6 rounded-2xl shadow-sm border mb-6 text-center">
             <h2 class="text-lg font-bold text-gray-900 mb-2">Passwort festlegen / eingeben</h2>
-            <p class="text-sm text-gray-600 mb-4">Wähle ein beliebiges Passwort zum Entschlüsseln deiner Daten:</p>
-            <form onsubmit="initDatabase(event)" class="flex gap-2 max-w-md mx-auto">
-                <input type="password" id="userPassword" placeholder="Dein Wunsch-Passwort" required class="flex-1 px-4 py-2 border rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500">
-                <button type="submit" class="bg-indigo-600 text-white font-semibold px-6 py-2 rounded-xl hover:bg-indigo-700 transition">
-                    Starten
+            <p class="text-sm text-gray-600 mb-4">Wähle dein Master-Passwort zum Verschlüsseln deiner Daten:</p>
+            <form onsubmit="initDatabase(event)" class="max-w-md mx-auto space-y-3">
+                <input type="password" id="userPassword" placeholder="Dein Master-Passwort" required class="w-full px-4 py-2 border rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500">
+                
+                <div class="flex items-center justify-center gap-2 text-sm text-gray-600">
+                    <input type="checkbox" id="rememberPassword" class="w-4 h-4 text-indigo-600 rounded">
+                    <label for="rememberPassword">Passwort auf diesem Gerät speichern (Auto-Login)</label>
+                </div>
+
+                <button type="submit" class="w-full bg-indigo-600 text-white font-semibold px-6 py-2 rounded-xl hover:bg-indigo-700 transition">
+                    Starten / Entschlüsseln
                 </button>
             </form>
         </div>
 
-        <!-- Hauptbereich (Sichtbar nach Freischaltung) -->
+        <!-- Hauptbereich -->
         <div id="mainContent" class="hidden">
             <!-- Budget Übersicht -->
             <div class="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
@@ -89,55 +93,81 @@
     </div>
 
     <script>
-        let allExpenses = [];
+        let localDB = null;
+        let remoteDB = null;
         let currentPassword = "";
+        let allExpenses = [];
+
+        // Hier tragen wir als Nächstes deine CouchDB Cloud-Adresse ein:
+        const COUCHDB_URL = ""; 
+
+        // Automatische Prüfung beim Laden der Seite
+        window.addEventListener('DOMContentLoaded', () => {
+            const savedPassword = localStorage.getItem('haushaltsbuch_saved_pw');
+            if (savedPassword) {
+                document.getElementById('userPassword').value = savedPassword;
+                document.getElementById('rememberPassword').checked = true;
+                initDatabase(); // Automatisch einloggen!
+            }
+        });
 
         function initDatabase(e) {
             if (e) e.preventDefault();
             const pwInput = document.getElementById('userPassword').value;
-            
-            if (!pwInput) {
-                alert("Bitte gib ein Passwort ein!");
-                return;
-            }
+            const remember = document.getElementById('rememberPassword').checked;
+
+            if (!pwInput) return;
 
             currentPassword = pwInput;
 
-            // Lade vorhandene Daten aus dem lokalen Speicher
-            const savedData = localStorage.getItem('haushaltsbuch_data');
-            if (savedData) {
-                try {
-                    if (typeof CryptoJS !== 'undefined') {
-                        let bytes = CryptoJS.AES.decrypt(savedData, currentPassword);
-                        let decryptedData = bytes.toString(CryptoJS.enc.Utf8);
-                        if (decryptedData) {
-                            allExpenses = JSON.parse(decryptedData);
-                        } else {
-                            allExpenses = [];
-                        }
-                    } else {
-                        allExpenses = JSON.parse(savedData);
-                    }
-                } catch (err) {
-                    allExpenses = [];
-                }
+            // Passwort merken oder löschen
+            if (remember) {
+                localStorage.setItem('haushaltsbuch_saved_pw', currentPassword);
+            } else {
+                localStorage.removeItem('haushaltsbuch_saved_pw');
             }
 
-            // Benutzeroberfläche umschalten
+            localDB = new PouchDB('haushaltsbuch_pouch');
+
+            // CouchDB Live-Synchronisation
+            if (COUCHDB_URL) {
+                remoteDB = new PouchDB(COUCHDB_URL);
+                localDB.sync(remoteDB, { live: true, retry: true })
+                    .on('change', () => loadExpenses())
+                    .on('error', (err) => console.error("Sync Fehler:", err));
+            }
+
             document.getElementById('passwordArea').classList.add('hidden');
             document.getElementById('mainContent').classList.remove('hidden');
-            renderUI();
+            loadExpenses();
         }
 
-        function saveData() {
-            let dataToSave = JSON.stringify(allExpenses);
-            if (typeof CryptoJS !== 'undefined' && currentPassword) {
-                dataToSave = CryptoJS.AES.encrypt(dataToSave, currentPassword).toString();
+        async function loadExpenses() {
+            if (!localDB) return;
+            try {
+                const result = await localDB.allDocs({ include_docs: true });
+                allExpenses = [];
+
+                for (let row of result.rows) {
+                    if (row.doc.encryptedData) {
+                        try {
+                            let bytes = CryptoJS.AES.decrypt(row.doc.encryptedData, currentPassword);
+                            let decrypted = JSON.parse(bytes.toString(CryptoJS.enc.Utf8));
+                            decrypted._id = row.doc._id;
+                            decrypted._rev = row.doc._rev;
+                            allExpenses.push(decrypted);
+                        } catch (e) {
+                            console.error("Entschlüsselungsfehler:", row.doc._id);
+                        }
+                    }
+                }
+                renderUI();
+            } catch (err) {
+                console.error("Fehler beim Laden:", err);
             }
-            localStorage.setItem('haushaltsbuch_data', dataToSave);
         }
 
-        function addExpense(e) {
+        async function addExpense(e) {
             e.preventDefault();
             const category = document.getElementById('expenseCategory').value;
             const name = document.getElementById('expenseName').value;
@@ -145,26 +175,25 @@
 
             if (!name || isNaN(amount)) return;
 
-            const newExpense = {
-                id: Date.now().toString(),
-                category: category,
-                name: name,
-                amount: amount
+            const payload = JSON.stringify({ category, name, amount, date: new Date().toISOString() });
+            const encrypted = CryptoJS.AES.encrypt(payload, currentPassword).toString();
+
+            const doc = {
+                _id: 'expense_' + Date.now(),
+                encryptedData: encrypted
             };
 
-            allExpenses.unshift(newExpense);
-            saveData();
-
+            await localDB.put(doc);
             document.getElementById('expenseName').value = '';
             document.getElementById('expenseAmount').value = '';
-            renderUI();
+            loadExpenses();
         }
 
-        function deleteExpense(id) {
+        async function deleteExpense(id) {
             if (!confirm("Eintrag wirklich löschen?")) return;
-            allExpenses = allExpenses.filter(item => item.id !== id);
-            saveData();
-            renderUI();
+            const doc = await localDB.get(id);
+            await localDB.remove(doc);
+            loadExpenses();
         }
 
         function renderUI() {
@@ -183,7 +212,7 @@
                         <td class="p-3 font-medium">${item.name}</td>
                         <td class="p-3 text-right font-bold">${item.amount.toFixed(2).replace('.', ',')} €</td>
                         <td class="p-3 text-center">
-                            <button onclick="deleteExpense('${item.id}')" class="text-red-500 hover:text-red-700 font-bold px-2 py-1">✕</button>
+                            <button onclick="deleteExpense('${item._id}')" class="text-red-500 hover:text-red-700 font-bold px-2 py-1">✕</button>
                         </td>
                     `;
                     tableBody.appendChild(tr);
@@ -198,6 +227,7 @@
         }
 
         function logoutPasswort() {
+            localStorage.removeItem('haushaltsbuch_saved_pw');
             location.reload();
         }
     </script>
